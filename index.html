@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Calculadora de presupuestos · Impresión 3D</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  html, body { margin:0; padding:0; background:#0e1013; }
+  #root { padding: 20px; box-sizing: border-box; }
+  * { box-sizing: border-box; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/@babel/standalone@7.23.9/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useMemo } = React;
+
+/* ---------------- Almacenamiento local (reemplaza al storage de Claude) ---------------- */
+const storage = {
+  get: (key) =>
+    new Promise((resolve, reject) => {
+      const v = localStorage.getItem(key);
+      if (v === null) { reject(new Error("not found")); return; }
+      resolve({ key, value: v });
+    }),
+  set: (key, value) =>
+    new Promise((resolve) => {
+      localStorage.setItem(key, value);
+      resolve({ key, value });
+    }),
+};
+
+/* ---------------- Set de íconos minimalista (sin dependencias externas) ---------------- */
+const ICON_PATHS = {
+  printer: <><path d="M6 9V4h12v5" /><rect x="4" y="9" width="16" height="8" rx="1" /><rect x="7" y="14" width="10" height="6" /></>,
+  package: <><path d="M21 8l-9-5-9 5 9 5 9-5z" /><path d="M3 8v8l9 5 9-5V8" /><path d="M12 13v8" /></>,
+  clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 3" /></>,
+  wrench: <path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 1 5.4-5.4l-3-3z" />,
+  trendingUp: <><path d="M3 17l6-6 4 4 8-8" /><path d="M17 7h4v4" /></>,
+  layers: <><path d="M12 3 3 8l9 5 9-5-9-5z" /><path d="M3 13l9 5 9-5" /></>,
+  rotateCcw: <><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /></>,
+  zap: <path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z" />,
+  gauge: <><circle cx="12" cy="12" r="9" /><path d="M12 12 16 8" /><path d="M8 15h.01" /></>,
+  plus: <><path d="M12 5v14" /><path d="M5 12h14" /></>,
+  trash: <><path d="M4 7h16" /><path d="M9 7V4h6v3" /><path d="M6 7l1 13h10l1-13" /></>,
+  save: <><path d="M5 4h11l3 3v13H5z" /><path d="M8 4v5h8V4" /><path d="M8 14h8v6H8z" /></>,
+  copy: <><rect x="9" y="9" width="12" height="12" rx="1" /><path d="M5 15V5a1 1 0 0 1 1-1h10" /></>,
+  check: <path d="M20 6 9 17l-5-5" />,
+  cart: <><circle cx="9" cy="20" r="1" /><circle cx="18" cy="20" r="1" /><path d="M3 4h2l2.4 12.4a2 2 0 0 0 2 1.6h7.2a2 2 0 0 0 2-1.6L21 8H6" /></>,
+  sparkles: <><path d="M12 3v4" /><path d="M12 17v4" /><path d="M3 12h4" /><path d="M17 12h4" /><path d="M6 6l2 2" /><path d="M16 16l2 2" /><path d="M18 6l-2 2" /><path d="M8 16l-2 2" /></>,
+  pen: <><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" /></>,
+};
+
+function Icon({ name, size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      {ICON_PATHS[name]}
+    </svg>
+  );
+}
+
+/* ---------------- Datos por defecto ---------------- */
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+const DEFAULT_MATERIALS = [
+  { id: "pla", name: "PLA", pricePerKg: 18000 },
+  { id: "petg", name: "PETG", pricePerKg: 22000 },
+];
+
+const DEFAULT_SETTINGS = { precioKwh: 450, ganancia: 30, comisionPercent: 18, comisionEnabled: false };
+
+const fmt = (n) =>
+  new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 2 }).format(
+    Number.isFinite(n) ? n : 0
+  );
+
+const CHART_COLORS = {
+  Material: "#33D6C0",
+  Electricidad: "#FFB627",
+  Desgaste: "#7C9EF5",
+  "Margen error": "#F2708C",
+  Insumos: "#B98CE0",
+  Diseño: "#5FD98A",
+  Posprocesado: "#FF8A5C",
+  Ganancia: "#F4E04D",
+};
+
+/* ---------------- Componentes chicos ---------------- */
+function Section({ icon, title, children }) {
+  return (
+    <div className="q3d-panel">
+      <div className="q3d-section-head">
+        <Icon name={icon} size={15} />
+        <span>{title}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function Field({ label, hint, children }) {
+  return (
+    <label className="q3d-field">
+      <span className="q3d-field-label">{label}</span>
+      {children}
+      {hint && <span className="q3d-hint">{hint}</span>}
+    </label>
+  );
+}
+
+function ModeToggle({ value, onChange, leftLabel, rightLabel }) {
+  return (
+    <div className="q3d-toggle">
+      <button className={value === "fijo" ? "active" : ""} onClick={() => onChange("fijo")}>{leftLabel}</button>
+      <button className={value === "hora" ? "active" : ""} onClick={() => onChange("hora")}>{rightLabel}</button>
+    </div>
+  );
+}
+
+/* Donut simple hecho con conic-gradient, sin librerías externas */
+function DonutChart({ data, total }) {
+  let acc = 0;
+  const stops = data.map((d) => {
+    const pct = (d.value / total) * 100;
+    const start = acc;
+    acc += pct;
+    return `${CHART_COLORS[d.name]} ${start}% ${acc}%`;
+  });
+  const gradient = `conic-gradient(${stops.join(",")})`;
+  return (
+    <div className="q3d-donut-wrap">
+      <div className="q3d-donut" style={{ background: gradient }}>
+        <div className="q3d-donut-hole"></div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- App principal ---------------- */
+function App() {
+  const [loaded, setLoaded] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
+
+  const [printerProfiles, setPrinterProfiles] = useState([]);
+  const [materialCatalog, setMaterialCatalog] = useState(DEFAULT_MATERIALS);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [pp, mc, gs] = await Promise.allSettled([
+          storage.get("printer-profiles"),
+          storage.get("material-catalog"),
+          storage.get("global-settings"),
+        ]);
+        if (pp.status === "fulfilled") setPrinterProfiles(JSON.parse(pp.value.value));
+        if (mc.status === "fulfilled") setMaterialCatalog(JSON.parse(mc.value.value));
+        else await storage.set("material-catalog", JSON.stringify(DEFAULT_MATERIALS));
+        if (gs.status === "fulfilled") setSettings(JSON.parse(gs.value.value));
+        else await storage.set("global-settings", JSON.stringify(DEFAULT_SETTINGS));
+      } catch (e) {
+        console.error("Error cargando datos guardados:", e);
+      } finally {
+        setLoaded(true);
+      }
+    })();
+  }, []);
+
+  const persistPrinterProfiles = useCallback(async (next) => {
+    setPrinterProfiles(next);
+    try { await storage.set("printer-profiles", JSON.stringify(next)); } catch (e) { console.error(e); }
+  }, []);
+  const persistCatalog = useCallback(async (next) => {
+    setMaterialCatalog(next);
+    try { await storage.set("material-catalog", JSON.stringify(next)); } catch (e) { console.error(e); }
+  }, []);
+  const persistSettings = useCallback(async (next) => {
+    setSettings(next);
+    try { await storage.set("global-settings", JSON.stringify(next)); } catch (e) { console.error(e); }
+  }, []);
+
+  const [projectName, setProjectName] = useState("Soporte de auriculares");
+  const [quantity, setQuantity] = useState(1);
+
+  const [selectedProfileId, setSelectedProfileId] = useState("new");
+  const [profileNameInput, setProfileNameInput] = useState("");
+  const [overwrite, setOverwrite] = useState(false);
+  const [consumoW, setConsumoW] = useState(150);
+  const [desgasteHoras, setDesgasteHoras] = useState(5000);
+  const [precioRepuestos, setPrecioRepuestos] = useState(300000);
+  const [margenError, setMargenError] = useState(15);
+
+  const applyProfile = (profile) => {
+    setConsumoW(profile.consumoW);
+    setDesgasteHoras(profile.desgasteHoras);
+    setPrecioRepuestos(profile.precioRepuestos);
+    setMargenError(profile.margenError);
+    setProfileNameInput(profile.name);
+  };
+
+  const handleProfileSelect = (id) => {
+    setSelectedProfileId(id);
+    if (id === "new") { setProfileNameInput(""); return; }
+    const p = printerProfiles.find((x) => x.id === id);
+    if (p) applyProfile(p);
+  };
+
+  const flashSaved = (msg) => { setSaveMsg(msg); setTimeout(() => setSaveMsg(""), 1800); };
+
+  const saveProfile = async () => {
+    const name = profileNameInput.trim();
+    if (!name) return;
+    const data = { consumoW: Number(consumoW), desgasteHoras: Number(desgasteHoras), precioRepuestos: Number(precioRepuestos), margenError: Number(margenError) };
+    let next;
+    if (overwrite && selectedProfileId !== "new") {
+      next = printerProfiles.map((p) => (p.id === selectedProfileId ? { ...p, name, ...data } : p));
+    } else {
+      const newProfile = { id: uid(), name, ...data };
+      next = [...printerProfiles, newProfile];
+      setSelectedProfileId(newProfile.id);
+    }
+    await persistPrinterProfiles(next);
+    flashSaved("Perfil guardado");
+  };
+
+  const deleteProfile = async () => {
+    if (selectedProfileId === "new") return;
+    const next = printerProfiles.filter((p) => p.id !== selectedProfileId);
+    await persistPrinterProfiles(next);
+    setSelectedProfileId("new");
+    setProfileNameInput("");
+  };
+
+  const precioKwh = settings.precioKwh;
+  const setPrecioKwh = (v) => persistSettings({ ...settings, precioKwh: v });
+
+  const [horas, setHoras] = useState(8);
+  const [minutos, setMinutos] = useState(20);
+  const horasImpresion = Number(horas || 0) + Number(minutos || 0) / 60;
+
+  const [filaments, setFilaments] = useState([{ id: uid(), catalogId: "pla", name: "PLA", pricePerKg: 18000, grams: 230 }]);
+
+  const addFilament = () => {
+    const first = materialCatalog[0] || { id: "custom", name: "Personalizado", pricePerKg: 0 };
+    setFilaments((f) => [...f, { id: uid(), catalogId: first.id, name: first.name, pricePerKg: first.pricePerKg, grams: 0 }]);
+  };
+  const removeFilament = (id) => setFilaments((f) => f.filter((x) => x.id !== id));
+  const updateFilament = (id, patch) => setFilaments((f) => f.map((x) => (x.id === id ? { ...x, ...patch } : x)));
+
+  const handleFilamentCatalogChange = (id, catalogId) => {
+    if (catalogId === "custom") { updateFilament(id, { catalogId, name: "Personalizado" }); return; }
+    const mat = materialCatalog.find((m) => m.id === catalogId);
+    if (mat) updateFilament(id, { catalogId, name: mat.name, pricePerKg: mat.pricePerKg });
+  };
+
+  const saveFilamentToCatalog = async (fil) => {
+    const name = fil.name.trim() || "Material";
+    const existing = materialCatalog.find((m) => m.id === fil.catalogId);
+    let next;
+    if (existing) {
+      next = materialCatalog.map((m) => (m.id === fil.catalogId ? { ...m, name, pricePerKg: Number(fil.pricePerKg) } : m));
+    } else {
+      const newMat = { id: uid(), name, pricePerKg: Number(fil.pricePerKg) };
+      next = [...materialCatalog, newMat];
+      updateFilament(fil.id, { catalogId: newMat.id });
+    }
+    await persistCatalog(next);
+    flashSaved("Material guardado en catálogo");
+  };
+
+  const [insumos, setInsumos] = useState(0);
+  const [disenoMode, setDisenoMode] = useState("fijo");
+  const [disenoMontoFijo, setDisenoMontoFijo] = useState(0);
+  const [disenoTarifaHora, setDisenoTarifaHora] = useState(3000);
+  const [disenoHoras, setDisenoHoras] = useState(0.5);
+
+  const [posMode, setPosMode] = useState("hora");
+  const [posMontoFijo, setPosMontoFijo] = useState(0);
+  const [posTarifaHora, setPosTarifaHora] = useState(1000);
+  const [posHoras, setPosHoras] = useState(1);
+
+  const calc = useMemo(() => {
+    const materialCost = filaments.reduce((sum, f) => sum + (Number(f.grams) / 1000) * Number(f.pricePerKg || 0), 0);
+    const electricidad = (Number(consumoW) / 1000) * horasImpresion * Number(precioKwh);
+    const desgaste = Number(desgasteHoras) > 0 ? (Number(precioRepuestos) / Number(desgasteHoras)) * horasImpresion : 0;
+    const costosBase = materialCost + electricidad + desgaste;
+    const margenErrorCost = costosBase * (Number(margenError) / 100);
+    const costoProduccion = costosBase + margenErrorCost;
+    const disenoCost = disenoMode === "fijo" ? Number(disenoMontoFijo) : Number(disenoTarifaHora) * Number(disenoHoras);
+    const posprocesadoCost = posMode === "fijo" ? Number(posMontoFijo) : Number(posTarifaHora) * Number(posHoras);
+    const insumosCost = Number(insumos);
+    const totalCostos = costoProduccion + insumosCost + disenoCost + posprocesadoCost;
+    const gananciaCost = totalCostos * (Number(settings.ganancia) / 100);
+    const precioFinalUnit = totalCostos + gananciaCost;
+    const precioConComisionUnit = precioFinalUnit * (1 + Number(settings.comisionPercent) / 100);
+    const qty = Number(quantity || 1);
+    return {
+      materialCost, electricidad, desgaste, costosBase, margenErrorCost, costoProduccion,
+      disenoCost, posprocesadoCost, insumosCost, totalCostos, gananciaCost,
+      precioFinalUnit, precioConComisionUnit,
+      totalFinal: precioFinalUnit * qty, totalConComision: precioConComisionUnit * qty,
+    };
+  }, [filaments, consumoW, horasImpresion, precioKwh, desgasteHoras, precioRepuestos, margenError,
+      disenoMode, disenoMontoFijo, disenoTarifaHora, disenoHoras,
+      posMode, posMontoFijo, posTarifaHora, posHoras, insumos, settings, quantity]);
+
+  const chartData = useMemo(() => {
+    const raw = [
+      { name: "Material", value: calc.materialCost },
+      { name: "Electricidad", value: calc.electricidad },
+      { name: "Desgaste", value: calc.desgaste },
+      { name: "Margen error", value: calc.margenErrorCost },
+      { name: "Insumos", value: calc.insumosCost },
+      { name: "Diseño", value: calc.disenoCost },
+      { name: "Posprocesado", value: calc.posprocesadoCost },
+      { name: "Ganancia", value: calc.gananciaCost },
+    ];
+    return raw.filter((d) => d.value > 0.009);
+  }, [calc]);
+
+  const [copied, setCopied] = useState(false);
+
+  const buildResumenText = (forClient) => {
+    const total = fmt(settings.comisionEnabled ? calc.totalConComision : calc.totalFinal);
+    if (forClient) {
+      return [
+        `📦 *Presupuesto: ${projectName || "Pieza 3D"}*`,
+        quantity > 1 ? `Cantidad: ${quantity} u.` : null,
+        `Tiempo de impresión: ${horas}h ${minutos}min`,
+        ``,
+        `💰 *Total: ${total}*`,
+        ``,
+        `Cualquier consulta, ¡avisame!`,
+      ].filter(Boolean).join("\n");
+    }
+    return [
+      `Presupuesto: ${projectName || "Sin nombre"}`,
+      `Cantidad: ${quantity}`,
+      `--- Costos base ---`,
+      `Material: ${fmt(calc.materialCost)}`,
+      `Electricidad: ${fmt(calc.electricidad)}`,
+      `Desgaste: ${fmt(calc.desgaste)}`,
+      `--- Costos adicionales ---`,
+      `Margen de error: ${fmt(calc.margenErrorCost)}`,
+      `Insumos: ${fmt(calc.insumosCost)}`,
+      `Diseño: ${fmt(calc.disenoCost)}`,
+      `Posprocesado: ${fmt(calc.posprocesadoCost)}`,
+      `Total costos: ${fmt(calc.totalCostos)}`,
+      `Ganancia (${settings.ganancia}%): ${fmt(calc.gananciaCost)}`,
+      `PRECIO FINAL (unitario): ${fmt(calc.precioFinalUnit)}`,
+      settings.comisionEnabled ? `Precio con comisión (+${settings.comisionPercent}%): ${fmt(calc.precioConComisionUnit)}` : null,
+      `TOTAL (${quantity} u.): ${total}`,
+    ].filter(Boolean).join("\n");
+  };
+
+  const copyResumen = async () => {
+    try {
+      await navigator.clipboard.writeText(buildResumenText(false));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch (e) { console.error("No se pudo copiar:", e); }
+  };
+
+  const shareWhatsapp = () => {
+    const text = buildResumenText(true);
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
+  };
+
+  const resetForm = () => {
+    setProjectName("Soporte de auriculares");
+    setQuantity(1);
+    setHoras(8);
+    setMinutos(20);
+    setFilaments([{ id: uid(), catalogId: materialCatalog[0]?.id || "pla", name: materialCatalog[0]?.name || "PLA", pricePerKg: materialCatalog[0]?.pricePerKg || 18000, grams: 230 }]);
+    setInsumos(0);
+    setDisenoMode("fijo"); setDisenoMontoFijo(0); setDisenoTarifaHora(3000); setDisenoHoras(0.5);
+    setPosMode("hora"); setPosMontoFijo(0); setPosTarifaHora(1000); setPosHoras(1);
+  };
+
+  return (
+    <div className="q3d-root">
+      <div className="q3d-header">
+        <div className="q3d-title-block">
+          <div className="q3d-icon-badge"><Icon name="printer" size={22} /></div>
+          <div>
+            <p className="q3d-title">Calculadora de presupuestos</p>
+            <p className="q3d-subtitle">Impresión 3D · perfiles guardados en este navegador · ARS</p>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {saveMsg && <span className="q3d-save-msg"><Icon name="check" size={13} /> {saveMsg}</span>}
+          <button className="q3d-reset" onClick={resetForm}><Icon name="rotateCcw" size={13} /> Restablecer</button>
+        </div>
+      </div>
+
+      {!loaded ? (
+        <div style={{ padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>Cargando…</div>
+      ) : (
+      <div className="q3d-body">
+        <div className="q3d-col">
+          <Section icon="package" title="Proyecto">
+            <Field label="Nombre del proyecto">
+              <input value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder="Ej: Soporte de auriculares" />
+            </Field>
+          </Section>
+
+          <Section icon="gauge" title="Perfiles de impresora">
+            <div className="q3d-row">
+              <Field label="Perfil guardado">
+                <select value={selectedProfileId} onChange={(e) => handleProfileSelect(e.target.value)}>
+                  <option value="new">+ Nuevo perfil</option>
+                  {printerProfiles.map((p) => (<option key={p.id} value={p.id}>{p.name}</option>))}
+                </select>
+              </Field>
+              <Field label="Nombre del perfil">
+                <input value={profileNameInput} onChange={(e) => setProfileNameInput(e.target.value)} placeholder="Ej: Bambu A1" />
+              </Field>
+            </div>
+            <div className="q3d-check-row">
+              <label className="q3d-inline-check">
+                <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} disabled={selectedProfileId === "new"} />
+                Sobrescribir perfil seleccionado
+              </label>
+              <div style={{ display: "flex", gap: 6 }}>
+                {selectedProfileId !== "new" && (
+                  <button className="q3d-btn q3d-btn-danger q3d-btn-sm" onClick={deleteProfile}><Icon name="trash" size={12} /> Eliminar</button>
+                )}
+                <button className="q3d-btn q3d-btn-primary q3d-btn-sm" onClick={saveProfile}><Icon name="save" size={12} /> Guardar perfil</button>
+              </div>
+            </div>
+            <div className="q3d-row">
+              <Field label="Consumo real por hora (W)">
+                <input type="number" min="0" value={consumoW} onChange={(e) => setConsumoW(e.target.value)} />
+              </Field>
+              <Field label="Desgaste máquina (horas de vida útil)">
+                <input type="number" min="0" value={desgasteHoras} onChange={(e) => setDesgasteHoras(e.target.value)} />
+              </Field>
+            </div>
+            <div className="q3d-row">
+              <Field label="Precio repuestos / mantenimiento" hint="Costo total a lo largo de esa vida útil">
+                <input type="number" min="0" value={precioRepuestos} onChange={(e) => setPrecioRepuestos(e.target.value)} />
+              </Field>
+              <Field label="% Margen de error" hint="Buffer por fallas o desperdicio">
+                <input type="number" min="0" value={margenError} onChange={(e) => setMargenError(e.target.value)} />
+              </Field>
+            </div>
+          </Section>
+
+          <Section icon="zap" title="Gastos fijos">
+            <Field label="Precio kWh (ARS)">
+              <input type="number" min="0" value={precioKwh} onChange={(e) => setPrecioKwh(e.target.value)} />
+            </Field>
+          </Section>
+
+          <Section icon="layers" title="Pieza · Filamentos">
+            {filaments.map((f) => (
+              <div className="q3d-filament-card" key={f.id}>
+                <div className="q3d-filament-head">
+                  <span className="q3d-filament-title">Filamento</span>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    <button className="q3d-icon-btn" title="Guardar en catálogo" onClick={() => saveFilamentToCatalog(f)}><Icon name="save" size={13} /></button>
+                    {filaments.length > 1 && (
+                      <button className="q3d-icon-btn" title="Quitar" onClick={() => removeFilament(f.id)}><Icon name="trash" size={13} /></button>
+                    )}
+                  </div>
+                </div>
+                <div className="q3d-row3">
+                  <Field label="Material">
+                    <select value={f.catalogId} onChange={(e) => handleFilamentCatalogChange(f.id, e.target.value)}>
+                      {materialCatalog.map((m) => (<option key={m.id} value={m.id}>{m.name}</option>))}
+                      <option value="custom">Personalizado</option>
+                    </select>
+                  </Field>
+                  <Field label="Precio/KG (ARS)">
+                    <input type="number" min="0" value={f.pricePerKg} onChange={(e) => updateFilament(f.id, { pricePerKg: e.target.value })} />
+                  </Field>
+                  <Field label="Gramos">
+                    <input type="number" min="0" value={f.grams} onChange={(e) => updateFilament(f.id, { grams: e.target.value })} />
+                  </Field>
+                </div>
+              </div>
+            ))}
+            <button className="q3d-add-btn" onClick={addFilament}><Icon name="plus" size={14} /> Agregar filamento</button>
+            <div className="q3d-row" style={{ marginTop: 4 }}>
+              <Field label="Horas de impresión">
+                <input type="number" min="0" value={horas} onChange={(e) => setHoras(e.target.value)} />
+              </Field>
+              <Field label="Minutos">
+                <input type="number" min="0" max="59" value={minutos} onChange={(e) => setMinutos(e.target.value)} />
+              </Field>
+            </div>
+          </Section>
+
+          <Section icon="wrench" title="Extras">
+            <Field label="Insumos (monto fijo)" hint="Adhesivo, tornillería, empaque, etc.">
+              <input type="number" min="0" value={insumos} onChange={(e) => setInsumos(e.target.value)} />
+            </Field>
+            <div className="q3d-field">
+              <span className="q3d-field-label"><Icon name="pen" size={12} /> Diseño y modelado 3D</span>
+              <ModeToggle value={disenoMode} onChange={setDisenoMode} leftLabel="Monto fijo" rightLabel="Por hora" />
+            </div>
+            {disenoMode === "fijo" ? (
+              <Field label="Monto fijo (ARS)">
+                <input type="number" min="0" value={disenoMontoFijo} onChange={(e) => setDisenoMontoFijo(e.target.value)} />
+              </Field>
+            ) : (
+              <div className="q3d-row">
+                <Field label="Tarifa/hora (ARS)">
+                  <input type="number" min="0" value={disenoTarifaHora} onChange={(e) => setDisenoTarifaHora(e.target.value)} />
+                </Field>
+                <Field label="Horas dedicadas">
+                  <input type="number" min="0" step="0.1" value={disenoHoras} onChange={(e) => setDisenoHoras(e.target.value)} />
+                </Field>
+              </div>
+            )}
+            <div className="q3d-field">
+              <span className="q3d-field-label"><Icon name="sparkles" size={12} /> Posprocesado</span>
+              <ModeToggle value={posMode} onChange={setPosMode} leftLabel="Monto fijo" rightLabel="Por hora" />
+            </div>
+            {posMode === "fijo" ? (
+              <Field label="Monto fijo (ARS)">
+                <input type="number" min="0" value={posMontoFijo} onChange={(e) => setPosMontoFijo(e.target.value)} />
+              </Field>
+            ) : (
+              <div className="q3d-row">
+                <Field label="Tarifa/hora (ARS)">
+                  <input type="number" min="0" value={posTarifaHora} onChange={(e) => setPosTarifaHora(e.target.value)} />
+                </Field>
+                <Field label="Horas dedicadas">
+                  <input type="number" min="0" step="0.1" value={posHoras} onChange={(e) => setPosHoras(e.target.value)} />
+                </Field>
+              </div>
+            )}
+          </Section>
+
+          <Section icon="trendingUp" title="Ganancia y comisión">
+            <div className="q3d-row">
+              <Field label="% Ganancia">
+                <input type="number" min="0" value={settings.ganancia} onChange={(e) => persistSettings({ ...settings, ganancia: e.target.value })} />
+              </Field>
+              <Field label="Cantidad de piezas">
+                <input type="number" min="1" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+              </Field>
+            </div>
+            <div className="q3d-check-row">
+              <label className="q3d-inline-check" style={{ fontSize: 12.5 }}>
+                <span className="q3d-switch">
+                  <input type="checkbox" checked={settings.comisionEnabled} onChange={(e) => persistSettings({ ...settings, comisionEnabled: e.target.checked })} />
+                  <span className="q3d-switch-track"></span>
+                </span>
+                Incluir comisión de venta externa (ML, redes, etc.)
+              </label>
+            </div>
+            {settings.comisionEnabled && (
+              <Field label="% Comisión externa">
+                <input type="number" min="0" value={settings.comisionPercent} onChange={(e) => persistSettings({ ...settings, comisionPercent: e.target.value })} />
+              </Field>
+            )}
+          </Section>
+        </div>
+
+        <div className="q3d-col">
+          <div className="q3d-receipt">
+            <div className="q3d-receipt-title">Costos base</div>
+            <div className="q3d-line"><span className="lbl">Material</span><span className="val">{fmt(calc.materialCost)}</span></div>
+            <div className="q3d-line"><span className="lbl">Electricidad</span><span className="val">{fmt(calc.electricidad)}</span></div>
+            <div className="q3d-line"><span className="lbl">Desgaste</span><span className="val">{fmt(calc.desgaste)}</span></div>
+            <hr className="q3d-divider" />
+            <div className="q3d-receipt-title">Costos adicionales</div>
+            <div className="q3d-line"><span className="lbl">Margen de error ({margenError}%)</span><span className="val">{fmt(calc.margenErrorCost)}</span></div>
+            <div className="q3d-line"><span className="lbl">Costo de producción</span><span className="val">{fmt(calc.costoProduccion)}</span></div>
+            <div className="q3d-line"><span className="lbl">Insumos</span><span className="val">{fmt(calc.insumosCost)}</span></div>
+            <div className="q3d-line"><span className="lbl">Diseño</span><span className="val">{fmt(calc.disenoCost)}</span></div>
+            <div className="q3d-line"><span className="lbl">Posprocesado</span><span className="val">{fmt(calc.posprocesadoCost)}</span></div>
+            <hr className="q3d-divider" />
+            <div className="q3d-subtotal-line"><span>Total costos</span><span>{fmt(calc.totalCostos)}</span></div>
+            <div className="q3d-line"><span className="lbl">Ganancia ({settings.ganancia}%)</span><span className="val">{fmt(calc.gananciaCost)}</span></div>
+          </div>
+
+          <div className="q3d-final-box">
+            <span className="q3d-final-label">Precio final · total a cobrar</span>
+            <span className="q3d-final-value">{fmt(quantity > 1 ? calc.totalFinal : calc.precioFinalUnit)}</span>
+          </div>
+
+          {settings.comisionEnabled && (
+            <div className="q3d-commission-box">
+              <div className="q3d-commission-top">
+                <span className="q3d-commission-title"><Icon name="cart" size={13} /> Precio con comisión (+{settings.comisionPercent}%)</span>
+                <span className="q3d-commission-value">{fmt(quantity > 1 ? calc.totalConComision : calc.precioConComisionUnit)}</span>
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="q3d-copy-btn" onClick={copyResumen}>
+              {copied ? <><Icon name="check" size={14} /> Copiado</> : <><Icon name="copy" size={14} /> Copiar resumen</>}
+            </button>
+            <button className="q3d-wa-btn" onClick={shareWhatsapp}>Enviar por WhatsApp</button>
+          </div>
+
+          {chartData.length > 0 && (
+            <div className="q3d-chart-panel">
+              <div className="q3d-chart-title">Distribución de costos</div>
+              <DonutChart data={chartData} total={calc.precioFinalUnit} />
+              <div className="q3d-legend">
+                {chartData.map((d) => {
+                  const pct = ((d.value / (calc.precioFinalUnit || 1)) * 100).toFixed(1);
+                  return (
+                    <span className="q3d-legend-item" key={d.name}>
+                      <span className="q3d-legend-dot" style={{ background: CHART_COLORS[d.name] }}></span>
+                      {d.name}: {pct}%
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+
+<style>
+  .q3d-root {
+    --bg: #16181c; --panel: #1f2227; --panel-2: #262a30; --line: #33383f;
+    --text: #eceef1; --muted: #8a93a1; --accent: #33D6C0;
+    --paper: #f3ede0; --paper-text: #23201a; --paper-muted: #7c7565;
+    font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+    background: var(--bg); color: var(--text); border-radius: 16px; padding: 26px;
+    display: flex; flex-direction: column; gap: 18px; max-width: 1080px; margin: 0 auto; box-sizing: border-box;
+  }
+  .q3d-header { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  .q3d-title-block { display:flex; align-items:center; gap:12px; }
+  .q3d-icon-badge { width:42px; height:42px; border-radius:10px; background:var(--accent); display:flex; align-items:center; justify-content:center; color:#16181c; flex-shrink:0; }
+  .q3d-title { font-size:20px; font-weight:700; letter-spacing:-0.01em; margin:0; }
+  .q3d-subtitle { font-size:12.5px; color:var(--muted); margin:2px 0 0; }
+  .q3d-reset { display:flex; align-items:center; gap:6px; background:transparent; border:1px solid var(--line); color:var(--muted); font-size:12.5px; padding:7px 12px; border-radius:8px; cursor:pointer; }
+  .q3d-reset:hover { color:var(--text); border-color:var(--muted); }
+  .q3d-body { display:grid; grid-template-columns: 1.15fr 0.85fr; gap:20px; align-items:start; }
+  @media (max-width: 760px) { .q3d-body { grid-template-columns: 1fr; } }
+  .q3d-col { display:flex; flex-direction:column; gap:14px; }
+  .q3d-panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; display:flex; flex-direction:column; gap:12px; }
+  .q3d-section-head { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; color:var(--accent); }
+  .q3d-row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .q3d-row3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; }
+  .q3d-field { display:flex; flex-direction:column; gap:5px; }
+  .q3d-field-label { font-size:11.5px; color:var(--muted); font-weight:500; display:flex; align-items:center; gap:4px; }
+  .q3d-hint { font-size:10.5px; color:var(--muted); opacity:0.8; }
+  .q3d-field input, .q3d-field select {
+    background:var(--panel-2); border:1px solid var(--line); color:var(--text); border-radius:8px;
+    padding:8px 9px; font-size:13.5px; font-family:'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace;
+    outline:none; width:100%; box-sizing:border-box;
+  }
+  .q3d-field select { font-family:'Inter', ui-sans-serif, system-ui, sans-serif; }
+  .q3d-field input:focus, .q3d-field select:focus { border-color:var(--accent); }
+  .q3d-inline-check { display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--muted); cursor:pointer; }
+  .q3d-btn { display:flex; align-items:center; justify-content:center; gap:6px; border:none; border-radius:8px; padding:8px 12px; font-size:12.5px; font-weight:600; cursor:pointer; }
+  .q3d-btn-primary { background:var(--accent); color:#0f1113; }
+  .q3d-btn-danger { background:transparent; color:#F2708C; border:1px solid #4a2c33; }
+  .q3d-btn-sm { padding:5px 8px; font-size:11px; }
+  .q3d-profile-row { display:grid; grid-template-columns: 1fr auto; gap:8px; align-items:end; }
+  .q3d-save-msg { font-size:11px; color:var(--accent); display:flex; align-items:center; gap:5px; }
+  .q3d-filament-card { border:1px solid var(--line); border-radius:10px; padding:10px; display:flex; flex-direction:column; gap:8px; background:var(--panel-2); }
+  .q3d-filament-head { display:flex; justify-content:space-between; align-items:center; }
+  .q3d-filament-title { font-size:11.5px; color:var(--muted); font-weight:600; }
+  .q3d-icon-btn { background:transparent; border:none; color:var(--muted); cursor:pointer; padding:3px; border-radius:5px; display:flex; }
+  .q3d-icon-btn:hover { color:var(--text); background:var(--panel); }
+  .q3d-toggle { display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .q3d-toggle button { flex:1; background:var(--panel-2); color:var(--muted); border:none; padding:8px; font-size:12px; font-weight:600; cursor:pointer; }
+  .q3d-toggle button.active { background:var(--accent); color:#0f1113; }
+  .q3d-add-btn { display:flex; align-items:center; justify-content:center; gap:6px; border:1px dashed var(--line); border-radius:8px; padding:9px; color:var(--muted); background:transparent; cursor:pointer; font-size:12.5px; font-weight:600; }
+  .q3d-add-btn:hover { color:var(--accent); border-color:var(--accent); }
+  .q3d-check-row { display:flex; align-items:center; justify-content:space-between; }
+  .q3d-receipt { background:var(--paper); color:var(--paper-text); border-radius:10px; padding:18px 18px 20px; font-family:'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace; box-shadow:0 12px 30px -10px rgba(0,0,0,0.5); }
+  .q3d-receipt-title { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--paper-muted); font-weight:700; margin-bottom:8px; }
+  .q3d-line { display:flex; justify-content:space-between; font-size:12px; padding:2.5px 0; gap:10px; }
+  .q3d-line .lbl { color:var(--paper-muted); }
+  .q3d-line .val { font-weight:600; white-space:nowrap; }
+  .q3d-divider { border:none; border-top:1px dashed #b7ae98; margin:8px 0; }
+  .q3d-subtotal-line { display:flex; justify-content:space-between; font-size:12.5px; font-weight:700; padding:4px 0; }
+  .q3d-final-box { background:#1f5c46; color:#eafff5; border-radius:10px; padding:14px 16px; display:flex; justify-content:space-between; align-items:center; }
+  .q3d-final-label { font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:#9fe8cd; }
+  .q3d-final-value { font-size:21px; font-weight:700; }
+  .q3d-commission-box { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .q3d-commission-top { display:flex; justify-content:space-between; align-items:center; }
+  .q3d-commission-title { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:700; color:#FFB627; }
+  .q3d-commission-value { font-size:16px; font-weight:700; color:#FFB627; }
+  .q3d-copy-btn, .q3d-wa-btn { flex:1; display:flex; align-items:center; justify-content:center; gap:6px; padding:10px; border-radius:8px; font-size:12.5px; font-weight:600; cursor:pointer; }
+  .q3d-copy-btn { border:1px solid var(--line); background:var(--panel); color:var(--text); }
+  .q3d-copy-btn:hover { border-color:var(--accent); }
+  .q3d-wa-btn { border:none; background:#25D366; color:#0b2b17; }
+  .q3d-wa-btn:hover { filter:brightness(1.05); }
+  .q3d-chart-panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .q3d-chart-title { font-size:12px; font-weight:700; color:var(--muted); text-align:center; margin-bottom:10px; text-transform:uppercase; letter-spacing:.05em; }
+  .q3d-donut-wrap { display:flex; justify-content:center; }
+  .q3d-donut { width:150px; height:150px; border-radius:50%; position:relative; }
+  .q3d-donut-hole { position:absolute; inset:28px; background:var(--panel); border-radius:50%; }
+  .q3d-legend { display:flex; flex-wrap:wrap; gap:8px 12px; justify-content:center; margin-top:10px; }
+  .q3d-legend-item { display:flex; align-items:center; gap:5px; font-size:10.5px; color:var(--muted); }
+  .q3d-legend-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+  .q3d-switch { position:relative; width:34px; height:19px; flex-shrink:0; }
+  .q3d-switch input { opacity:0; width:0; height:0; }
+  .q3d-switch-track { position:absolute; inset:0; background:var(--line); border-radius:20px; cursor:pointer; }
+  .q3d-switch-track:before { content:""; position:absolute; width:14px; height:14px; left:2.5px; top:2.5px; background:var(--muted); border-radius:50%; transition:.15s; }
+  .q3d-switch input:checked + .q3d-switch-track { background:var(--accent); }
+  .q3d-switch input:checked + .q3d-switch-track:before { transform:translateX(15px); background:#0f1113; }
+</style>
+</body>
+</html>
